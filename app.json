@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "SleepTracker",
+    "slug": "sleep-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0D1B2A"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.sleeptracker.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Die App benötigt Mikrofonzugang, um deinen Schlaf aufzuzeichnen und Schnarchen oder Reden zu erkennen.",
+        "UIBackgroundModes": ["audio"]
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0D1B2A"
+      },
+      "package": "com.sleeptracker.app",
+      "permissions": [
+        "RECORD_AUDIO",
+        "WAKE_LOCK",
+        "RECEIVE_BOOT_COMPLETED",
+        "FOREGROUND_SERVICE"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Die App benötigt Mikrofonzugang, um deinen Schlaf aufzuzeichnen und Schnarchen oder Reden zu erkennen."
+        }
+      ],
+      "expo-sqlite"
+    ]
+  }
+}
