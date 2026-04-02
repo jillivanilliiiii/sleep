@@ -8,12 +8,12 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 //  Dann füge deine Konfiguration hier ein (Projekt > Einstellungen > Deine Apps)
 // ─────────────────────────────────────────────────────────────
 const firebaseConfig = {
-  apiKey: "DEINE_API_KEY",
-  authDomain: "DEIN_PROJEKT.firebaseapp.com",
-  projectId: "DEIN_PROJEKT_ID",
-  storageBucket: "DEIN_PROJEKT.appspot.com",
-  messagingSenderId: "DEINE_SENDER_ID",
-  appId: "DEINE_APP_ID",
+  apiKey: "AIzaSyD1C6h1GUdnOHXaBnm339P6Q0ECLvKBxz4",
+  authDomain: "sleepapp-47051.firebaseapp.com",
+  projectId: "sleepapp-47051",
+  storageBucket: "sleepapp-47051.firebasestorage.app",
+  messagingSenderId: "155221073785",
+  appId: "1:155221073785:web:0ad61d69ac476ba9df19a8",
 };
 
 // Singleton – verhindert doppelte Initialisierung bei Hot-Reload
