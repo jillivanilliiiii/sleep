@@ -39,8 +39,7 @@
         {
           "microphonePermission": "Die App benötigt Mikrofonzugang, um deinen Schlaf aufzuzeichnen und Schnarchen oder Reden zu erkennen."
         }
-      ],
-      "expo-sqlite"
+      ]
     ]
   }
 }
