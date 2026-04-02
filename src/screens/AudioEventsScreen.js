@@ -115,12 +115,10 @@ export default function AudioEventsScreen() {
               {segments.length} Segment{segments.length !== 1 ? 'e' : ''} ·{' '}
               {SleepDataService.formatDate(session.startTime)}
             </Text>
-            {segments.some((s) => s.firebaseUrl) && (
-              <View style={styles.cloudBadge}>
-                <Ionicons name="cloud-done-outline" size={14} color={Colors.success} />
-                <Text style={styles.cloudText}>In der Cloud gespeichert</Text>
-              </View>
-            )}
+            <View style={styles.cloudBadge}>
+              <Ionicons name="phone-portrait-outline" size={14} color={Colors.textMuted} />
+              <Text style={styles.cloudText}>Lokal auf dem Gerät gespeichert</Text>
+            </View>
           </View>
         }
         renderItem={({ item }) => {
@@ -133,9 +131,6 @@ export default function AudioEventsScreen() {
                 <View style={{ flex: 1 }}>
                   <View style={styles.segmentTitleRow}>
                     <Text style={styles.segmentTitle}>Segment {item.index + 1}</Text>
-                    {item.firebaseUrl && (
-                      <Ionicons name="cloud-done" size={14} color={Colors.success} />
-                    )}
                   </View>
                   {segEvents.length > 0 ? (
                     <View style={styles.segmentEvents}>

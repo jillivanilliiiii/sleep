@@ -1,7 +1,5 @@
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { storage, auth } from './firebase';
 
 // dB-Schwellwerte (expo-av metering: -160 = Stille, 0 = Maximum)
 const SNORING_THRESHOLD = -20;   // laut & anhaltend → Schnarchen
@@ -23,7 +21,7 @@ class AudioService {
     this.isMonitoring = false;
     this.onEventDetected = null;
     this.onLevelUpdate = null;
-    this.onUploadProgress = null;
+
     this.eventBuffer = [];
     this.currentEvent = null;
     this.segmentTimer = null;
@@ -152,39 +150,16 @@ class AudioService {
         const seg = {
           index: this.segmentIndex,
           localPath,
-          firebaseUrl: null,
           startTime: Date.now() - SEGMENT_DURATION_MS,
           endTime: Date.now(),
         };
         this.savedSegments.push(seg);
-        // Upload to Firebase in background (don't block recording)
-        this._uploadSegment(seg);
       }
       this.segmentIndex++;
     } catch (e) {
       console.error('Segment rotation error:', e);
     }
     await this._startSegment();
-  }
-
-  async _uploadSegment(seg) {
-    try {
-      const uid = auth.currentUser?.uid;
-      if (!uid) return;
-
-      const fileInfo = await FileSystem.getInfoAsync(seg.localPath);
-      if (!fileInfo.exists) return;
-
-      // Read file as blob
-      const response = await fetch(seg.localPath);
-      const blob = await response.blob();
-
-      const storageRef = ref(storage, `audio/${uid}/${this.sessionId}/segment_${seg.index}.m4a`);
-      await uploadBytes(storageRef, blob, { contentType: 'audio/mp4' });
-      seg.firebaseUrl = await getDownloadURL(storageRef);
-    } catch (e) {
-      console.warn('Upload segment error (non-fatal):', e);
-    }
   }
 
   async stopSession() {
@@ -214,25 +189,16 @@ class AudioService {
           const seg = {
             index: this.segmentIndex,
             localPath,
-            firebaseUrl: null,
             startTime: Date.now() - SEGMENT_DURATION_MS,
             endTime: Date.now(),
           };
           this.savedSegments.push(seg);
-          await this._uploadSegment(seg); // await final segment upload
         }
       } catch (e) {
         console.error('Stop recording error:', e);
       }
       this.recording = null;
     }
-
-    // Upload any remaining segments that haven't been uploaded yet
-    await Promise.allSettled(
-      this.savedSegments
-        .filter((s) => !s.firebaseUrl)
-        .map((s) => this._uploadSegment(s))
-    );
 
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: false,

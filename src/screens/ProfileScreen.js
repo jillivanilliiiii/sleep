@@ -101,7 +101,8 @@ export default function ProfileScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Cloud & Daten</Text>
           <View style={styles.card}>
-            <Row icon="cloud-outline" iconColor={Colors.primary} label="Firebase Sync" value="Aktiv" />
+            <Row icon="cloud-outline" iconColor={Colors.primary} label="Schlafdaten-Sync" value="Firestore" />
+            <Row icon="mic-outline" iconColor={Colors.textMuted} label="Audioaufnahmen" value="Lokal (Handy)" />
             <Row icon="lock-closed-outline" iconColor={Colors.success} label="Datenverschlüsselung" value="AES-256" />
             <Row icon="server-outline" iconColor={Colors.secondary} label="Speicherort" value="EU (Frankfurt)" />
           </View>

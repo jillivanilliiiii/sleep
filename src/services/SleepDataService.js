@@ -12,10 +12,9 @@ import {
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore';
-import { ref, deleteObject, listAll } from 'firebase/storage';
 import { format, differenceInMinutes, parseISO } from 'date-fns';
 import { de } from 'date-fns/locale';
-import { db, storage, auth } from './firebase';
+import { db, auth } from './firebase';
 
 export const SleepQuality = {
   EXCELLENT: 'excellent',
@@ -128,18 +127,8 @@ class SleepDataService {
 
   async deleteSession(sessionId) {
     const col = sessionsCollection();
-    const uid = auth.currentUser?.uid;
-
-    // Delete Firestore doc
     const docRef = doc(col, sessionId);
     await deleteDoc(docRef).catch(() => {});
-
-    // Delete Firebase Storage audio files
-    try {
-      const audioRef = ref(storage, `audio/${uid}/${sessionId}`);
-      const list = await listAll(audioRef);
-      await Promise.all(list.items.map((item) => deleteObject(item)));
-    } catch {}
   }
 
   async getWeeklyStats() {
