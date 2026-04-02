@@ -1,10 +1,21 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as FileSystem from 'expo-file-system';
+import {
+  collection,
+  doc,
+  addDoc,
+  getDoc,
+  getDocs,
+  deleteDoc,
+  query,
+  orderBy,
+  limit,
+  where,
+  serverTimestamp,
+  Timestamp,
+} from 'firebase/firestore';
+import { ref, deleteObject, listAll } from 'firebase/storage';
 import { format, differenceInMinutes, parseISO } from 'date-fns';
 import { de } from 'date-fns/locale';
-
-const SESSIONS_KEY = 'sleep_sessions';
-const SETTINGS_KEY = 'sleep_settings';
+import { db, storage, auth } from './firebase';
 
 export const SleepQuality = {
   EXCELLENT: 'excellent',
@@ -17,87 +28,37 @@ function generateId() {
   return `sleep_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function calcSleepQuality(session) {
-  const durationHours = session.durationMinutes / 60;
-  const snoringEvents = session.events.filter((e) => e.type === 'snoring').length;
-  const talkingEvents = session.events.filter((e) => e.type === 'talking').length;
-  const totalEvents = snoringEvents + talkingEvents;
+function calcSleepScore(durationMinutes, events) {
+  const durationHours = durationMinutes / 60;
+  const snoringEvents = events.filter((e) => e.type === 'snoring').length;
+  const talkingEvents = events.filter((e) => e.type === 'talking').length;
 
   let score = 100;
-
-  // Penalize too short or too long sleep
   if (durationHours < 5) score -= 30;
   else if (durationHours < 6) score -= 15;
   else if (durationHours > 9) score -= 10;
-
-  // Penalize events
   score -= Math.min(snoringEvents * 5, 30);
   score -= Math.min(talkingEvents * 3, 15);
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
 
+function calcSleepQuality(score) {
   if (score >= 85) return SleepQuality.EXCELLENT;
   if (score >= 70) return SleepQuality.GOOD;
   if (score >= 50) return SleepQuality.FAIR;
   return SleepQuality.POOR;
 }
 
-function calcSleepScore(session) {
-  const durationHours = session.durationMinutes / 60;
-  const snoringEvents = session.events.filter((e) => e.type === 'snoring').length;
-  const talkingEvents = session.events.filter((e) => e.type === 'talking').length;
-
-  let score = 100;
-  if (durationHours < 5) score -= 30;
-  else if (durationHours < 6) score -= 15;
-  else if (durationHours > 9) score -= 10;
-  score -= Math.min(snoringEvents * 5, 30);
-  score -= Math.min(talkingEvents * 3, 15);
-
-  return Math.max(0, Math.min(100, Math.round(score)));
+function sessionsCollection() {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error('Nicht eingeloggt');
+  return collection(db, 'users', uid, 'sessions');
 }
 
 class SleepDataService {
-  async getAllSessions() {
-    try {
-      const raw = await AsyncStorage.getItem(SESSIONS_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  async saveSession(sessionData) {
-    const sessions = await this.getAllSessions();
-    sessions.unshift(sessionData);
-    await AsyncStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
-  }
-
-  async deleteSession(sessionId) {
-    const sessions = await this.getAllSessions();
-    const session = sessions.find((s) => s.id === sessionId);
-
-    // Delete audio files
-    if (session && session.sessionDir) {
-      try {
-        const info = await FileSystem.getInfoAsync(session.sessionDir);
-        if (info.exists) {
-          await FileSystem.deleteAsync(session.sessionDir, { idempotent: true });
-        }
-      } catch {}
-    }
-
-    const updated = sessions.filter((s) => s.id !== sessionId);
-    await AsyncStorage.setItem(SESSIONS_KEY, JSON.stringify(updated));
-  }
-
-  async getSessionById(sessionId) {
-    const sessions = await this.getAllSessions();
-    return sessions.find((s) => s.id === sessionId) || null;
-  }
-
   createNewSession() {
-    const id = generateId();
     return {
-      id,
+      id: generateId(),
       startTime: new Date().toISOString(),
       endTime: null,
       durationMinutes: 0,
@@ -114,20 +75,71 @@ class SleepDataService {
     const start = parseISO(session.startTime);
     const end = new Date(endTime);
     const durationMinutes = differenceInMinutes(end, start);
+    const score = calcSleepScore(durationMinutes, events);
 
-    const finalized = {
+    return {
       ...session,
       endTime: end.toISOString(),
       durationMinutes,
       events,
       segments,
       sessionDir,
+      score,
+      quality: calcSleepQuality(score),
     };
+  }
 
-    finalized.score = calcSleepScore(finalized);
-    finalized.quality = calcSleepQuality(finalized);
+  async saveSession(sessionData) {
+    const col = sessionsCollection();
+    // Use the generated ID as document ID so we can query it later
+    const docRef = doc(col, sessionData.id);
+    await addDoc(col, {
+      ...sessionData,
+      createdAt: serverTimestamp(),
+    }).catch(() => {});
+    // Use setDoc to control the ID
+    const { setDoc } = await import('firebase/firestore');
+    await setDoc(docRef, {
+      ...sessionData,
+      createdAt: serverTimestamp(),
+    });
+  }
 
-    return finalized;
+  async getAllSessions() {
+    const col = sessionsCollection();
+    const q = query(col, orderBy('startTime', 'desc'));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ ...d.data(), firestoreId: d.id }));
+  }
+
+  async getSessionById(sessionId) {
+    const col = sessionsCollection();
+    // Try by document ID first
+    const docRef = doc(col, sessionId);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) return { ...snap.data(), firestoreId: snap.id };
+
+    // Fallback: query by id field
+    const q = query(col, where('id', '==', sessionId), limit(1));
+    const result = await getDocs(q);
+    if (!result.empty) return { ...result.docs[0].data(), firestoreId: result.docs[0].id };
+    return null;
+  }
+
+  async deleteSession(sessionId) {
+    const col = sessionsCollection();
+    const uid = auth.currentUser?.uid;
+
+    // Delete Firestore doc
+    const docRef = doc(col, sessionId);
+    await deleteDoc(docRef).catch(() => {});
+
+    // Delete Firebase Storage audio files
+    try {
+      const audioRef = ref(storage, `audio/${uid}/${sessionId}`);
+      const list = await listAll(audioRef);
+      await Promise.all(list.items.map((item) => deleteObject(item)));
+    } catch {}
   }
 
   async getWeeklyStats() {
@@ -141,43 +153,20 @@ class SleepDataService {
     });
 
     if (recent.length === 0) {
-      return {
-        avgDuration: 0,
-        avgScore: 0,
-        totalSessions: 0,
-        totalSnoringEvents: 0,
-        totalTalkingEvents: 0,
-        dailyData: [],
-      };
+      return { avgDuration: 0, avgScore: 0, totalSessions: 0, totalSnoringEvents: 0, totalTalkingEvents: 0, dailyData: [] };
     }
 
-    const avgDuration =
-      recent.reduce((a, s) => a + s.durationMinutes, 0) / recent.length;
-    const avgScore =
-      recent.reduce((a, s) => a + (s.score || 0), 0) / recent.length;
+    const avgDuration = recent.reduce((a, s) => a + s.durationMinutes, 0) / recent.length;
+    const avgScore = recent.reduce((a, s) => a + (s.score || 0), 0) / recent.length;
+    const totalSnoringEvents = recent.reduce((a, s) => a + s.events.filter((e) => e.type === 'snoring').length, 0);
+    const totalTalkingEvents = recent.reduce((a, s) => a + s.events.filter((e) => e.type === 'talking').length, 0);
 
-    const totalSnoringEvents = recent.reduce(
-      (a, s) => a + s.events.filter((e) => e.type === 'snoring').length,
-      0
-    );
-    const totalTalkingEvents = recent.reduce(
-      (a, s) => a + s.events.filter((e) => e.type === 'talking').length,
-      0
-    );
-
-    // Build daily data for chart (last 7 days)
     const dailyData = [];
     for (let i = 6; i >= 0; i--) {
       const day = new Date(now - i * 24 * 60 * 60 * 1000);
       const dayStr = format(day, 'EEE', { locale: de });
-      const daySessions = recent.filter((s) => {
-        const d = parseISO(s.startTime);
-        return d.toDateString() === day.toDateString();
-      });
-      const hours =
-        daySessions.length > 0
-          ? daySessions.reduce((a, s) => a + s.durationMinutes, 0) / 60
-          : 0;
+      const daySessions = recent.filter((s) => parseISO(s.startTime).toDateString() === day.toDateString());
+      const hours = daySessions.length > 0 ? daySessions.reduce((a, s) => a + s.durationMinutes, 0) / 60 : 0;
       dailyData.push({ day: dayStr, hours: Math.round(hours * 10) / 10 });
     }
 
@@ -195,26 +184,14 @@ class SleepDataService {
     const sessions = await this.getAllSessions();
     const now = new Date();
     const monthAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
-
     const recent = sessions.filter((s) => {
       const d = parseISO(s.startTime);
       return d >= monthAgo && d <= now;
     });
-
     return {
       totalSessions: recent.length,
-      avgDuration:
-        recent.length > 0
-          ? Math.round(
-              recent.reduce((a, s) => a + s.durationMinutes, 0) / recent.length
-            )
-          : 0,
-      avgScore:
-        recent.length > 0
-          ? Math.round(
-              recent.reduce((a, s) => a + (s.score || 0), 0) / recent.length
-            )
-          : 0,
+      avgDuration: recent.length > 0 ? Math.round(recent.reduce((a, s) => a + s.durationMinutes, 0) / recent.length) : 0,
+      avgScore: recent.length > 0 ? Math.round(recent.reduce((a, s) => a + (s.score || 0), 0) / recent.length) : 0,
       bestScore: recent.length > 0 ? Math.max(...recent.map((s) => s.score || 0)) : 0,
     };
   }
@@ -262,31 +239,6 @@ class SleepDataService {
     if (score >= 70) return '#4A9EFF';
     if (score >= 50) return '#FFC048';
     return '#FF6B6B';
-  }
-
-  async getSettings() {
-    try {
-      const raw = await AsyncStorage.getItem(SETTINGS_KEY);
-      return raw
-        ? JSON.parse(raw)
-        : {
-            targetSleepHours: 8,
-            bedtimeReminder: true,
-            reminderTime: '22:30',
-            noiseReduction: true,
-          };
-    } catch {
-      return {
-        targetSleepHours: 8,
-        bedtimeReminder: true,
-        reminderTime: '22:30',
-        noiseReduction: true,
-      };
-    }
-  }
-
-  async saveSettings(settings) {
-    await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }
 }
 

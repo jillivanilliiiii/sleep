@@ -113,13 +113,13 @@ export default function SleepTrackerScreen() {
     setTrackingState(STATE.FINISHED);
 
     try {
-      const { events: finalEvents, segments } = await AudioService.stopSession();
+      const { events: finalEvents, segments, sessionDir } = await AudioService.stopSession();
       const finalized = SleepDataService.finalizeSession(
         session,
         Date.now(),
         finalEvents,
         segments,
-        AudioService.sessionDir
+        sessionDir
       );
       await SleepDataService.saveSession(finalized);
       setSession(finalized);

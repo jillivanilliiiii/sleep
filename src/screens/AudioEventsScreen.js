@@ -34,22 +34,22 @@ export default function AudioEventsScreen() {
       const s = await SleepDataService.getSessionById(sessionId);
       setSession(s);
 
-      if (s?.sessionDir) {
-        const files = [];
-        for (const seg of (s.segments || [])) {
-          const info = await FileSystem.getInfoAsync(seg.path);
-          if (info.exists) {
-            files.push(seg);
+      if (s?.segments?.length > 0) {
+        // Prefer Firebase URLs, fallback to local paths
+        const available = [];
+        for (const seg of s.segments) {
+          if (seg.firebaseUrl) {
+            available.push({ ...seg, playUri: seg.firebaseUrl });
+          } else if (seg.localPath) {
+            const info = await FileSystem.getInfoAsync(seg.localPath);
+            if (info.exists) available.push({ ...seg, playUri: seg.localPath });
           }
         }
-        setSegments(files);
+        setSegments(available);
       }
     };
     load();
-
-    return () => {
-      stopPlayback();
-    };
+    return () => { stopPlayback(); };
   }, [sessionId]);
 
   const stopPlayback = async () => {
@@ -63,33 +63,16 @@ export default function AudioEventsScreen() {
     setPlaying(null);
   };
 
-  const playSegment = async (segmentPath, segmentIndex) => {
-    if (playing === segmentIndex) {
-      await stopPlayback();
-      return;
-    }
-
+  const playSegment = async (playUri, segmentIndex) => {
+    if (playing === segmentIndex) { await stopPlayback(); return; }
     await stopPlayback();
-
     try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
-
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: segmentPath },
-        { shouldPlay: true }
-      );
-
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+      const { sound } = await Audio.Sound.createAsync({ uri: playUri }, { shouldPlay: true });
       soundRef.current = sound;
       setPlaying(segmentIndex);
-
       sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.didJustFinish) {
-          setPlaying(null);
-          soundRef.current = null;
-        }
+        if (status.didJustFinish) { setPlaying(null); soundRef.current = null; }
       });
     } catch (e) {
       Alert.alert('Fehler', 'Audio konnte nicht abgespielt werden.');
@@ -104,10 +87,6 @@ export default function AudioEventsScreen() {
       </View>
     );
   }
-
-  const eventsWithAudio = (session.events || []).filter(
-    (ev) => ev.segmentIndex !== undefined && segments.some((s) => s.index === ev.segmentIndex)
-  );
 
   if (segments.length === 0) {
     return (
@@ -136,32 +115,36 @@ export default function AudioEventsScreen() {
               {segments.length} Segment{segments.length !== 1 ? 'e' : ''} ·{' '}
               {SleepDataService.formatDate(session.startTime)}
             </Text>
+            {segments.some((s) => s.firebaseUrl) && (
+              <View style={styles.cloudBadge}>
+                <Ionicons name="cloud-done-outline" size={14} color={Colors.success} />
+                <Text style={styles.cloudText}>In der Cloud gespeichert</Text>
+              </View>
+            )}
           </View>
         }
         renderItem={({ item }) => {
-          const segEvents = (session.events || []).filter(
-            (ev) => ev.segmentIndex === item.index
-          );
+          const segEvents = (session.events || []).filter((ev) => ev.segmentIndex === item.index);
           const isPlaying = playing === item.index;
 
           return (
             <View style={styles.segmentCard}>
               <View style={styles.segmentHeader}>
-                <View>
-                  <Text style={styles.segmentTitle}>Segment {item.index + 1}</Text>
+                <View style={{ flex: 1 }}>
+                  <View style={styles.segmentTitleRow}>
+                    <Text style={styles.segmentTitle}>Segment {item.index + 1}</Text>
+                    {item.firebaseUrl && (
+                      <Ionicons name="cloud-done" size={14} color={Colors.success} />
+                    )}
+                  </View>
                   {segEvents.length > 0 ? (
                     <View style={styles.segmentEvents}>
                       {segEvents.map((ev, i) => {
                         const cfg = EVENT_ICONS[ev.type] || EVENT_ICONS.noise;
                         return (
-                          <View
-                            key={i}
-                            style={[styles.eventPill, { backgroundColor: cfg.color + '22' }]}
-                          >
+                          <View key={i} style={[styles.eventPill, { backgroundColor: cfg.color + '22' }]}>
                             <Ionicons name={cfg.icon} size={12} color={cfg.color} />
-                            <Text style={[styles.eventPillText, { color: cfg.color }]}>
-                              {cfg.label}
-                            </Text>
+                            <Text style={[styles.eventPillText, { color: cfg.color }]}>{cfg.label}</Text>
                           </View>
                         );
                       })}
@@ -172,17 +155,11 @@ export default function AudioEventsScreen() {
                 </View>
                 <TouchableOpacity
                   style={[styles.playBtn, isPlaying && styles.playBtnActive]}
-                  onPress={() => playSegment(item.path, item.index)}
+                  onPress={() => playSegment(item.playUri, item.index)}
                 >
-                  <Ionicons
-                    name={isPlaying ? 'pause' : 'play'}
-                    size={20}
-                    color={isPlaying ? Colors.background : Colors.primary}
-                  />
+                  <Ionicons name={isPlaying ? 'pause' : 'play'} size={20} color={isPlaying ? Colors.background : Colors.primary} />
                 </TouchableOpacity>
               </View>
-
-              {/* Waveform placeholder */}
               <View style={styles.waveformBar}>
                 {Array.from({ length: 40 }).map((_, i) => (
                   <View
@@ -191,12 +168,9 @@ export default function AudioEventsScreen() {
                       styles.waveformTick,
                       {
                         height: 4 + Math.random() * 16,
-                        backgroundColor:
-                          segEvents.length > 0
-                            ? isPlaying
-                              ? Colors.primary
-                              : Colors.borderLight
-                            : Colors.border,
+                        backgroundColor: segEvents.length > 0
+                          ? isPlaying ? Colors.primary : Colors.borderLight
+                          : Colors.border,
                       },
                     ]}
                   />
@@ -219,63 +193,22 @@ const styles = StyleSheet.create({
   header: { marginBottom: 20 },
   headerTitle: { fontSize: 22, fontWeight: 'bold', color: Colors.textPrimary },
   headerSub: { fontSize: 13, color: Colors.textSecondary, marginTop: 4 },
+  cloudBadge: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 8 },
+  cloudText: { fontSize: 12, color: Colors.success, fontWeight: '500' },
 
-  segmentCard: {
-    backgroundColor: Colors.surface,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 10,
-  },
-  segmentHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 12,
-  },
-  segmentTitle: { fontSize: 15, fontWeight: '700', color: Colors.textPrimary, marginBottom: 6 },
+  segmentCard: { backgroundColor: Colors.surface, borderRadius: 16, padding: 16, marginBottom: 10 },
+  segmentHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 },
+  segmentTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  segmentTitle: { fontSize: 15, fontWeight: '700', color: Colors.textPrimary },
   segmentEvents: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
-  eventPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 20,
-  },
+  eventPill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 20 },
   eventPillText: { fontSize: 11, fontWeight: '600' },
   quietSegment: { fontSize: 12, color: Colors.textMuted },
-
-  playBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: Colors.primary + '22',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: Colors.primary,
-  },
-  playBtnActive: {
-    backgroundColor: Colors.primary,
-  },
-
-  waveformBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 2,
-    height: 28,
-  },
-  waveformTick: {
-    flex: 1,
-    borderRadius: 2,
-  },
-
-  empty: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 40,
-  },
+  playBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: Colors.primary + '22', justifyContent: 'center', alignItems: 'center', borderWidth: 1.5, borderColor: Colors.primary },
+  playBtnActive: { backgroundColor: Colors.primary },
+  waveformBar: { flexDirection: 'row', alignItems: 'center', gap: 2, height: 28 },
+  waveformTick: { flex: 1, borderRadius: 2 },
+  empty: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 40 },
   emptyTitle: { fontSize: 20, fontWeight: 'bold', color: Colors.textPrimary, marginTop: 16 },
   emptySub: { fontSize: 14, color: Colors.textSecondary, textAlign: 'center', marginTop: 8, lineHeight: 20 },
 });

@@ -1,13 +1,15 @@
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { storage, auth } from './firebase';
 
-// Thresholds for event detection (dB metering values, -160 = silence, 0 = max)
-const SNORING_THRESHOLD = -20;    // loud, rhythmic noise
-const TALKING_THRESHOLD = -28;    // speech-level noise
-const SILENCE_THRESHOLD = -50;    // background silence
+// dB-Schwellwerte (expo-av metering: -160 = Stille, 0 = Maximum)
+const SNORING_THRESHOLD = -20;   // laut & anhaltend → Schnarchen
+const TALKING_THRESHOLD = -28;   // Sprachpegel → Reden
+const SILENCE_THRESHOLD = -50;   // Hintergrundgeräusch
 
-const SEGMENT_DURATION_MS = 10000; // 10s segments for continuous recording
-const EVENT_MIN_DURATION_MS = 3000; // event must last at least 3s to be saved
+const SEGMENT_DURATION_MS = 10000; // 10-Sekunden-Segmente
+const EVENT_MIN_DURATION_MS = 3000; // Ereignis muss mind. 3 s dauern
 
 export const EventType = {
   SNORING: 'snoring',
@@ -21,10 +23,12 @@ class AudioService {
     this.isMonitoring = false;
     this.onEventDetected = null;
     this.onLevelUpdate = null;
+    this.onUploadProgress = null;
     this.eventBuffer = [];
     this.currentEvent = null;
     this.segmentTimer = null;
     this.sessionDir = null;
+    this.sessionId = null;
     this.segmentIndex = 0;
     this.savedSegments = [];
   }
@@ -36,9 +40,7 @@ class AudioService {
 
   async startSession(sessionId) {
     const hasPermission = await this.requestPermissions();
-    if (!hasPermission) {
-      throw new Error('Mikrofon-Berechtigung verweigert');
-    }
+    if (!hasPermission) throw new Error('Mikrofon-Berechtigung verweigert');
 
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
@@ -46,6 +48,7 @@ class AudioService {
       staysActiveInBackground: true,
     });
 
+    this.sessionId = sessionId;
     this.sessionDir = `${FileSystem.documentDirectory}sessions/${sessionId}/`;
     await FileSystem.makeDirectoryAsync(this.sessionDir, { intermediates: true });
 
@@ -61,7 +64,6 @@ class AudioService {
 
   async _startSegment() {
     if (!this.isMonitoring) return;
-
     try {
       const recording = new Audio.Recording();
       await recording.prepareToRecordAsync({
@@ -84,20 +86,12 @@ class AudioService {
           linearPCMIsBigEndian: false,
           linearPCMIsFloat: false,
         },
-        web: {
-          mimeType: 'audio/webm',
-          bitsPerSecond: 64000,
-        },
+        web: { mimeType: 'audio/webm', bitsPerSecond: 64000 },
       });
-
       recording.setOnRecordingStatusUpdate(this._onStatusUpdate.bind(this));
       await recording.startAsync();
       this.recording = recording;
-
-      // Schedule next segment
-      this.segmentTimer = setTimeout(async () => {
-        await this._rotateSegment();
-      }, SEGMENT_DURATION_MS);
+      this.segmentTimer = setTimeout(() => this._rotateSegment(), SEGMENT_DURATION_MS);
     } catch (e) {
       console.error('Segment start error:', e);
     }
@@ -105,27 +99,16 @@ class AudioService {
 
   _onStatusUpdate(status) {
     if (!status.isRecording) return;
-
     const level = status.metering ?? -160;
-
-    if (this.onLevelUpdate) {
-      this.onLevelUpdate(level);
-    }
-
+    this.onLevelUpdate?.(level);
     this._analyzeLevel(level, status.durationMillis || 0);
   }
 
   _analyzeLevel(level, timestamp) {
     let detectedType = null;
-
-    if (level >= SNORING_THRESHOLD) {
-      detectedType = EventType.SNORING;
-    } else if (level >= TALKING_THRESHOLD) {
-      // Talking tends to have more variation; snoring is more sustained
-      detectedType = EventType.TALKING;
-    } else if (level >= SILENCE_THRESHOLD) {
-      detectedType = EventType.NOISE;
-    }
+    if (level >= SNORING_THRESHOLD) detectedType = EventType.SNORING;
+    else if (level >= TALKING_THRESHOLD) detectedType = EventType.TALKING;
+    else if (level >= SILENCE_THRESHOLD) detectedType = EventType.NOISE;
 
     if (detectedType) {
       if (!this.currentEvent) {
@@ -139,39 +122,24 @@ class AudioService {
         };
       } else {
         this.currentEvent.samples++;
-        if (level > this.currentEvent.peakLevel) {
-          this.currentEvent.peakLevel = level;
-        }
-        // Upgrade type if louder
-        if (
-          detectedType === EventType.SNORING &&
-          this.currentEvent.type !== EventType.SNORING
-        ) {
+        if (level > this.currentEvent.peakLevel) this.currentEvent.peakLevel = level;
+        if (detectedType === EventType.SNORING && this.currentEvent.type !== EventType.SNORING) {
           this.currentEvent.type = EventType.SNORING;
         }
       }
-    } else {
-      if (this.currentEvent) {
-        const duration = Date.now() - this.currentEvent.startTime;
-        if (duration >= EVENT_MIN_DURATION_MS) {
-          const event = {
-            ...this.currentEvent,
-            endTime: Date.now(),
-            duration,
-          };
-          this.eventBuffer.push(event);
-          if (this.onEventDetected) {
-            this.onEventDetected(event);
-          }
-        }
-        this.currentEvent = null;
+    } else if (this.currentEvent) {
+      const duration = Date.now() - this.currentEvent.startTime;
+      if (duration >= EVENT_MIN_DURATION_MS) {
+        const event = { ...this.currentEvent, endTime: Date.now(), duration };
+        this.eventBuffer.push(event);
+        this.onEventDetected?.(event);
       }
+      this.currentEvent = null;
     }
   }
 
   async _rotateSegment() {
     if (!this.isMonitoring || !this.recording) return;
-
     const oldRecording = this.recording;
     this.recording = null;
 
@@ -179,21 +147,44 @@ class AudioService {
       await oldRecording.stopAndUnloadAsync();
       const uri = oldRecording.getURI();
       if (uri) {
-        const destPath = `${this.sessionDir}segment_${this.segmentIndex}.m4a`;
-        await FileSystem.moveAsync({ from: uri, to: destPath });
-        this.savedSegments.push({
+        const localPath = `${this.sessionDir}segment_${this.segmentIndex}.m4a`;
+        await FileSystem.moveAsync({ from: uri, to: localPath });
+        const seg = {
           index: this.segmentIndex,
-          path: destPath,
+          localPath,
+          firebaseUrl: null,
           startTime: Date.now() - SEGMENT_DURATION_MS,
           endTime: Date.now(),
-        });
+        };
+        this.savedSegments.push(seg);
+        // Upload to Firebase in background (don't block recording)
+        this._uploadSegment(seg);
       }
       this.segmentIndex++;
     } catch (e) {
       console.error('Segment rotation error:', e);
     }
-
     await this._startSegment();
+  }
+
+  async _uploadSegment(seg) {
+    try {
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+
+      const fileInfo = await FileSystem.getInfoAsync(seg.localPath);
+      if (!fileInfo.exists) return;
+
+      // Read file as blob
+      const response = await fetch(seg.localPath);
+      const blob = await response.blob();
+
+      const storageRef = ref(storage, `audio/${uid}/${this.sessionId}/segment_${seg.index}.m4a`);
+      await uploadBytes(storageRef, blob, { contentType: 'audio/mp4' });
+      seg.firebaseUrl = await getDownloadURL(storageRef);
+    } catch (e) {
+      console.warn('Upload segment error (non-fatal):', e);
+    }
   }
 
   async stopSession() {
@@ -208,11 +199,7 @@ class AudioService {
     if (this.currentEvent) {
       const duration = Date.now() - this.currentEvent.startTime;
       if (duration >= EVENT_MIN_DURATION_MS) {
-        this.eventBuffer.push({
-          ...this.currentEvent,
-          endTime: Date.now(),
-          duration,
-        });
+        this.eventBuffer.push({ ...this.currentEvent, endTime: Date.now(), duration });
       }
       this.currentEvent = null;
     }
@@ -222,20 +209,30 @@ class AudioService {
         await this.recording.stopAndUnloadAsync();
         const uri = this.recording.getURI();
         if (uri) {
-          const destPath = `${this.sessionDir}segment_${this.segmentIndex}.m4a`;
-          await FileSystem.moveAsync({ from: uri, to: destPath });
-          this.savedSegments.push({
+          const localPath = `${this.sessionDir}segment_${this.segmentIndex}.m4a`;
+          await FileSystem.moveAsync({ from: uri, to: localPath });
+          const seg = {
             index: this.segmentIndex,
-            path: destPath,
+            localPath,
+            firebaseUrl: null,
             startTime: Date.now() - SEGMENT_DURATION_MS,
             endTime: Date.now(),
-          });
+          };
+          this.savedSegments.push(seg);
+          await this._uploadSegment(seg); // await final segment upload
         }
       } catch (e) {
         console.error('Stop recording error:', e);
       }
       this.recording = null;
     }
+
+    // Upload any remaining segments that haven't been uploaded yet
+    await Promise.allSettled(
+      this.savedSegments
+        .filter((s) => !s.firebaseUrl)
+        .map((s) => this._uploadSegment(s))
+    );
 
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: false,
@@ -245,25 +242,12 @@ class AudioService {
     return {
       events: this.eventBuffer,
       segments: this.savedSegments,
+      sessionDir: this.sessionDir,
     };
   }
 
-  getEvents() {
-    return [...this.eventBuffer];
-  }
-
-  /**
-   * Extract a short audio clip around an event for playback.
-   * Returns the path of the relevant segment file.
-   */
-  getSegmentPathForEvent(event) {
-    const segment = this.savedSegments.find(
-      (s) => s.index === event.segmentIndex
-    );
-    return segment ? segment.path : null;
-  }
-
   async playAudioFile(uri) {
+    await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
     const { sound } = await Audio.Sound.createAsync({ uri });
     await sound.playAsync();
     return sound;
